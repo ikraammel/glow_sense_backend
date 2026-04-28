@@ -1,0 +1,14 @@
+# Env
+.env
+
+# Build
+target/
+*.log
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
