@@ -42,3 +42,4 @@ app:
   allowed-origins:
     - http://localhost:3000
     - http://localhost:8081
+    - https://glow-sense-backend.onrender.com
