@@ -38,6 +38,9 @@ cloudinary:
 groq:
   api-key: ${GROQ_API_KEY}
 
+skin-model:
+  api-url: ${SKIN_MODEL_URL:http://localhost:5000}
+
 app:
   allowed-origins:
     - http://localhost:3000
