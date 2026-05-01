@@ -11,14 +11,18 @@ import com.smart_skin.smart_skin_app_backend.repos.ProductScanRepository;
 import com.smart_skin.smart_skin_app_backend.repos.UserRepository;
 import com.smart_skin.smart_skin_app_backend.services.CloudinaryService;
 import com.smart_skin.smart_skin_app_backend.services.ProductScanService;
+import com.smart_skin.smart_skin_app_backend.services.SkinModelService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -325,5 +329,83 @@ public class ProductScanServiceImp implements ProductScanService {
         return productScanRepository
                 .findByUserIdOrderByScannedAtDesc(userId, pageable)
                 .map(this::toDto);
+    }
+
+    @Service
+    @Slf4j
+    public static class SkinModelServiceImp implements SkinModelService {
+
+        @Value("${huggingface.model.url:https://eyaaa02-skin-condition-api.hf.space/predict}")
+        private String modelUrl;
+
+        private final RestTemplate restTemplate = new RestTemplate();
+
+        /**
+         * Prédit la condition cutanée en envoyant les bytes de l'image directement à HuggingFace.
+         * @param imageBytes  bytes bruts de l'image uploadée par l'utilisateur
+         * @param filename    nom du fichier (ex: "image.jpg")
+         */
+        @Override
+        public SkinModelResult predict(byte[] imageBytes, String filename) {
+            try {
+                HttpHeaders headers = new HttpHeaders();
+                headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+                // Créer le multipart avec les bytes de l'image
+                MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+                ByteArrayResource imageResource = new ByteArrayResource(imageBytes) {
+                    @Override
+                    public String getFilename() { return filename; }
+                };
+                body.add("image", imageResource);
+
+                HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+                ResponseEntity<Map> response = restTemplate.exchange(
+                        modelUrl, HttpMethod.POST, requestEntity, Map.class);
+
+                Map<?, ?> data = response.getBody();
+                if (data == null || data.containsKey("error")) {
+                    log.warn("HuggingFace model returned error: {}", data);
+                    return SkinModelResult.unavailable();
+                }
+
+                // Parser la réponse
+                String prediction = (String) data.get("prediction");
+
+                // confidence est retournée comme "87.42%" → parser le double
+                String confidenceStr = data.get("confidence").toString().replace("%", "").trim();
+                double confidence = Double.parseDouble(confidenceStr);
+
+                // all_probabilities : { "acne": 87.42, "dark spots": 5.1, ... }
+                Map<String, Double> allProbs = new HashMap<>();
+                Object probsRaw = data.get("all_probabilities");
+                if (probsRaw instanceof Map<?, ?> probsMap) {
+                    probsMap.forEach((k, v) ->
+                            allProbs.put(k.toString(), ((Number) v).doubleValue()));
+                }
+
+                log.info("HuggingFace prediction: {} ({:.1f}%)", prediction, confidence);
+                return new SkinModelResult(prediction, confidence, allProbs, true);
+
+            } catch (Exception e) {
+                log.warn("HuggingFace model unavailable: {}", e.getMessage());
+                return SkinModelResult.unavailable();
+            }
+        }
+
+        // Surcharge pour compatibilité si tu passes encore une URL (legacy)
+        @Override
+        public SkinModelResult predict(String imageUrl) {
+            try {
+                // Télécharger l'image depuis Cloudinary puis envoyer à HuggingFace
+                byte[] imageBytes = restTemplate.getForObject(imageUrl, byte[].class);
+                if (imageBytes == null) return SkinModelResult.unavailable();
+                return predict(imageBytes, "image.jpg");
+            } catch (Exception e) {
+                log.warn("Could not download image from URL: {}", e.getMessage());
+                return SkinModelResult.unavailable();
+            }
+        }
     }
 }

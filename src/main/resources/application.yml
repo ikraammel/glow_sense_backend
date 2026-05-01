@@ -38,8 +38,11 @@ cloudinary:
 groq:
   api-key: ${GROQ_API_KEY}
 
-skin-model:
-  api-url: ${SKIN_MODEL_URL:http://localhost:5000}
+# URL de ton modèle HuggingFace
+huggingface:
+  model:
+    url: https://eyaaa02-skin-condition-api.hf.space/predict
+
 
 app:
   allowed-origins:

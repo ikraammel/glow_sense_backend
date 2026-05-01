@@ -48,10 +48,6 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
     @Value("${groq.model:llama-3.3-70b-versatile}")
     private String groqModel;
 
-    // ════════════════════════════════════════════════════════════════
-    //  PUBLIC METHODS
-    // ════════════════════════════════════════════════════════════════
-
     @Override
     @Transactional
     public SkinAnalysisResponseDto analyzeImage(Long userId, MultipartFile image) {
@@ -59,16 +55,12 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Utilisateur non trouvé"));
 
-        // ── Validation image ─────────────────────────────────────────
         if (image.isEmpty()) throw new BadRequestException("Image vide");
-        String contentType = image.getContentType();
-        if (contentType == null || !contentType.startsWith("image/")) {
-            throw new BadRequestException("Le fichier doit être une image");
-        }
 
-        // ── 1. Upload Cloudinary ──────────────────────────────────────
+        // 1. Upload image
         Map<String, String> uploadResult = cloudinaryService.uploadImageWithDetails(
                 image, "skin_analyses/" + userId);
+
         String imageUrl = uploadResult.get("url");
 
         SkinImage skinImage = SkinImage.builder()
@@ -79,30 +71,182 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
                 .fileSize(image.getSize())
                 .build();
 
-        // ── 2. Modèle Python ─────────────────────────────────────────
-        SkinModelService.SkinModelResult modelResult = skinModelService.predict(imageUrl);
-        log.info("Python model → prediction: {} | confidence: {:.1f}% | available: {}",
-                modelResult.prediction, modelResult.confidence, modelResult.modelAvailable);
-
-        // ── 3. Groq (description + recommandations) ──────────────────
-        String aiResponse = callGroqWithModelContext(imageUrl, user, modelResult);
-
-        // ── 4. Parser la réponse Groq ─────────────────────────────────
-        SkinAnalysis analysis = parseAiResponse(aiResponse, user, skinImage);
-
-        // ── 5. Écraser les scores avec ceux du modèle Python ─────────
-        if (modelResult.modelAvailable) {
-            applyModelScores(analysis, modelResult);
+        // 2. PYTHON MODEL → ONLY DETECTION
+        SkinModelService.SkinModelResult modelResult;
+        try {
+            modelResult = skinModelService.predict(image.getBytes(),
+                    image.getOriginalFilename() != null ? image.getOriginalFilename() : "image.jpg");
+        } catch (Exception e) {
+            modelResult = SkinModelService.SkinModelResult.unavailable();
         }
 
-        // ── 6. Sauvegarder + notifier ─────────────────────────────────
+        // 3. SAVE BASE ANALYSIS (ONLY MODEL RESULTS)
+        SkinAnalysis analysis = SkinAnalysis.builder()
+                .user(user)
+                .skinImage(skinImage)
+                .detectedSkinType(mapSkinType(modelResult.prediction))
+                .analysisDescription(
+                        modelResult.modelAvailable
+                                ? String.format(
+                                "Analyse IA détecte %s avec %.1f%% de confiance.",
+                                modelResult.prediction,
+                                modelResult.confidence
+                        )
+                                : "Analyse IA indisponible, fallback utilisé."
+                )
+                .acneScore(50)
+                .pigmentationScore(50)
+                .wrinkleScore(50)
+                .poreScore(50)
+                .hydrationScore(50)
+                .overallScore(50)
+                .build();
+
+        if (modelResult.modelAvailable) {
+            analysis.setDetectedProblems(
+                    buildProblemsFromModel(modelResult, analysis)
+            );
+        }
+
+        applyModelScores(analysis, modelResult);
         analysis = skinAnalysisRepository.save(analysis);
+
+        // 4. GROQ → ONLY RECOMMANDATIONS
+        List<Recommandation> recommandations = callGroqForRecommandations(
+                modelResult, user, analysis);
+
+        analysis.setRecommandations(recommandations);
+        analysis = skinAnalysisRepository.save(analysis);
+
         notificationService.createAnalysisCompleteNotification(user, analysis);
 
-        log.info("Analysis complete for user {} — overall score: {}", userId, analysis.getOverallScore());
-
-        // ── 7. Retourner DTO avec données du modèle Python ───────────
         return toResponseDto(analysis, modelResult);
+    }
+
+    private SkinType mapSkinType(String prediction) {
+        if (prediction == null) return SkinType.INCONNU;
+
+        return switch (prediction.toLowerCase()) {
+            case "acne" -> SkinType.ACNEIQUE;
+            case "dry", "dry skin" -> SkinType.SEC;
+            case "oily", "oil skin" -> SkinType.GRAS;
+            case "combination", "mixed" -> SkinType.MIXTE;
+            case "sensitive" -> SkinType.SENSIBLE;
+            default -> SkinType.INCONNU;
+        };
+    }
+
+    private List<SkinProblem> buildProblemsFromModel(
+            SkinModelService.SkinModelResult modelResult,
+            SkinAnalysis analysis) {
+
+        List<SkinProblem> problems = new ArrayList<>();
+
+        if (modelResult.prediction == null) return problems;
+
+        Severity severity = modelResult.confidence > 70 ? Severity.SEVERE
+                : modelResult.confidence > 40 ? Severity.MODEREE
+                : Severity.LEGERE;
+
+        problems.add(SkinProblem.builder()
+                .skinAnalysis(analysis)
+                .problemType(modelResult.prediction)
+                .severity(severity)
+                .zone("global")
+                .description("Détecté par modèle IA")
+                .confidence(modelResult.confidence / 100.0)
+                .build());
+
+        return problems;
+    }
+
+    private List<Recommandation> callGroqForRecommandations(
+            SkinModelService.SkinModelResult modelResult,
+            User user,
+            SkinAnalysis analysis) {
+
+        String prompt = """
+Tu es un dermatologue expert.
+
+Contexte utilisateur :
+%s
+
+Analyse IA (modèle fiable) :
+- problème principal: %s
+- confiance: %.1f%%
+
+Donne uniquement des recommandations skincare adaptées.
+
+Réponds en JSON:
+{
+  "recommandations": [
+    {
+      "category": "...",
+      "title": "...",
+      "description": "...",
+      "activeIngredient": "...",
+      "priority": 1,
+      "applicationFrequency": "...",
+      "tips": "..."
+    }
+  ]
+}
+""".formatted(buildSkinContext(user), modelResult.prediction, modelResult.confidence);
+        try {
+            RestTemplate restTemplate = new RestTemplate();
+
+            Map<String, Object> body = Map.of(
+                    "model", groqModel,
+                    "messages", List.of(Map.of("role", "user", "content", prompt)),
+                    "temperature", 0.3,
+                    "response_format", Map.of("type", "json_object")
+            );
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(groqApiKey);
+
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    HttpMethod.POST,
+                    new HttpEntity<>(body, headers),
+                    Map.class
+            );
+
+            String content = ((Map<?, ?>)((Map<?, ?>)((List<?>)response.getBody().get("choices")).get(0)).get("message")).get("content").toString();
+
+            JsonNode root = objectMapper.readTree(content);
+
+            List<Recommandation> recs = new ArrayList<>();
+            for (JsonNode r : root.path("recommandations")) {
+                recs.add(Recommandation.builder()
+                        .skinAnalysis(analysis)
+                        .category(r.path("category").asText())
+                        .title(r.path("title").asText())
+                        .description(r.path("description").asText())
+                        .activeIngredient(r.path("activeIngredient").asText())
+                        .priority(r.path("priority").asInt(1))
+                        .applicationFrequency(r.path("applicationFrequency").asText())
+                        .tips(r.path("tips").asText())
+                        .build());
+            }
+
+            return recs;
+
+        } catch (Exception e) {
+            log.error("Groq error: {}", e.getMessage());
+            return List.of(
+                    Recommandation.builder()
+                            .skinAnalysis(analysis)
+                            .category("general")
+                            .title("Routine basique")
+                            .description("Nettoyant doux + hydratant + SPF")
+                            .priority(1)
+                            .applicationFrequency("matin_et_soir")
+                            .tips("Utilisez une protection solaire chaque jour")
+                            .build()
+            );
+        }
     }
 
     @Override
@@ -158,19 +302,33 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
     private void applyModelScores(SkinAnalysis analysis,
                                   SkinModelService.SkinModelResult modelResult) {
 
-        Map<String, Double> probs = modelResult.allProbabilities;
+        // 🔥 IMPORTANT : Initialiser les scores par défaut si null
+        if (analysis.getAcneScore() == null) analysis.setAcneScore(50);
+        if (analysis.getPigmentationScore() == null) analysis.setPigmentationScore(50);
+        if (analysis.getWrinkleScore() == null) analysis.setWrinkleScore(50);
+        if (analysis.getPoreScore() == null) analysis.setPoreScore(50);
+        if (analysis.getHydrationScore() == null) analysis.setHydrationScore(50);
+        if (analysis.getOverallScore() == null) analysis.setOverallScore(50);
+
+        Map<String, Double> probs = modelResult.allProbabilities != null
+                ? modelResult.allProbabilities
+                : new HashMap<>();
 
         if (probs.containsKey("acne")) {
-            analysis.setAcneScore(100 - probs.get("acne").intValue());
+            int aiScore = 100 - probs.get("acne").intValue();
+            analysis.setAcneScore((analysis.getAcneScore() + aiScore) / 2);
         }
         if (probs.containsKey("dark spots")) {
-            analysis.setPigmentationScore(100 - probs.get("dark spots").intValue());
+            int aiScore = 100 - probs.get("dark spots").intValue();
+            analysis.setPigmentationScore((analysis.getPigmentationScore() + aiScore) / 2);
         }
         if (probs.containsKey("wrinkles")) {
-            analysis.setWrinkleScore(100 - probs.get("wrinkles").intValue());
+            int aiScore = 100 - probs.get("wrinkles").intValue();
+            analysis.setWrinkleScore((analysis.getWrinkleScore() + aiScore) / 2);
         }
         if (probs.containsKey("pores")) {
-            analysis.setPoreScore(100 - probs.get("pores").intValue());
+            int aiScore = 100 - probs.get("pores").intValue();
+            analysis.setPoreScore((analysis.getPoreScore() + aiScore) / 2);
         }
         // hydrationScore reste celui de Groq (le modèle Python ne le prédit pas)
 
@@ -211,108 +369,6 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  PRIVATE — APPEL GROQ
-    // ════════════════════════════════════════════════════════════════
-
-    private String callGroqWithModelContext(String imageUrl,
-                                            User user,
-                                            SkinModelService.SkinModelResult modelResult) {
-
-        String skinContext  = buildSkinContext(user);
-        String modelContext = buildModelContext(modelResult);
-
-        String prompt = """
-                Tu es un dermatologue IA expert. Analyse cette image de peau.
-                
-                Contexte modèle IA : %s
-                Contexte utilisateur : %s
-                
-                Réponds UNIQUEMENT en JSON valide avec cette structure exacte:
-                {
-                  "detectedSkinType": "NORMAL|SEC|GRAS|MIXTE|SENSIBLE|ACNEIQUE|MATURE",
-                  "overallScore": <0-100>,
-                  "hydrationScore": <0-100>,
-                  "acneScore": <0-100>,
-                  "pigmentationScore": <0-100>,
-                  "wrinkleScore": <0-100>,
-                  "poreScore": <0-100>,
-                  "analysisDescription": "<description générale en français, cohérente avec le modèle IA>",
-                  "problems": [
-                    {
-                      "problemType": "<acne|tache|ride|pore|deshydratation|rougeur|cicatrice|comedons>",
-                      "severity": "LEGERE|MODEREE|SEVERE",
-                      "zone": "<front|joues|nez|menton|tempes|contour_yeux|global>",
-                      "description": "<description>",
-                      "confidence": <0.0-1.0>
-                    }
-                  ],
-                  "recommandations": [
-                    {
-                      "category": "<nettoyant|hydratant|traitement|protection_solaire|gommage|serum|alimentation|style_de_vie>",
-                      "title": "<titre court>",
-                      "description": "<explication>",
-                      "activeIngredient": "<ingredient cle>",
-                      "priority": <1|2|3>,
-                      "applicationFrequency": "<matin|soir|matin_et_soir|hebdomadaire>",
-                      "tips": "<conseil pratique>"
-                    }
-                  ]
-                }
-                
-                Important: aligne ta description avec la détection du modèle IA.
-                Minimum 3 problèmes et 5 recommandations.
-                """.formatted(modelContext, skinContext);
-
-        try {
-            RestTemplate restTemplate = new RestTemplate();
-
-            Map<String, Object> textContent  = Map.of("type", "text", "text", prompt);
-            Map<String, Object> imageContent = Map.of(
-                    "type", "image_url",
-                    "image_url", Map.of("url", imageUrl, "detail", "high"));
-            Map<String, Object> message = Map.of(
-                    "role", "user",
-                    "content", List.of(textContent, imageContent));
-            Map<String, Object> body = Map.of(
-                    "model", "llama-3.3-70b-versatile",
-                    "messages", List.of(message),
-                    "temperature", 0.2,
-                    "max_tokens", 2000,
-                    "response_format", Map.of("type", "json_object"));
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(groqApiKey);
-
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    HttpMethod.POST,
-                    new HttpEntity<>(body, headers),
-                    Map.class);
-
-            Map<?, ?> responseBody = response.getBody();
-            if (responseBody != null && responseBody.get("choices") != null) {
-                List<?> choices = (List<?>) responseBody.get("choices");
-                if (!choices.isEmpty()) {
-                    Map<?, ?> msg = (Map<?, ?>) ((Map<?, ?>) choices.get(0)).get("message");
-                    if (msg != null && msg.get("content") != null) {
-                        return msg.get("content").toString();
-                    }
-                }
-            }
-
-        } catch (Exception e) {
-            log.error("Groq API error: {}", e.getMessage(), e);
-        }
-
-        return buildFallbackResponse();
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  PRIVATE — HELPERS
-    // ════════════════════════════════════════════════════════════════
-
     private String buildSkinContext(User user) {
         return String.format(
                 "Type de peau déclaré: %s | Problèmes: %s | Ethnicity: %s | Soleil: %s",
@@ -335,7 +391,7 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
                 modelResult.allProbabilities.getOrDefault("dark spots",  0.0),
                 modelResult.allProbabilities.getOrDefault("wrinkles",    0.0),
                 modelResult.allProbabilities.getOrDefault("pores",       0.0),
-                modelResult.allProbabilities.getOrDefault("blackheades", 0.0));
+                modelResult.allProbabilities.getOrDefault("blackheads", 0.0));
     }
 
     private SkinAnalysis parseAiResponse(String aiJson, User user, SkinImage skinImage) {
@@ -391,6 +447,10 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
                 }
             }
             analysis.setRecommandations(recs);
+
+            // 🔥 IMPORTANT : lier chaque entité à analysis pour éviter les erreurs de foreign key
+            analysis.getRecommandations().forEach(r -> r.setSkinAnalysis(analysis));
+            analysis.getDetectedProblems().forEach(p -> p.setSkinAnalysis(analysis));
 
             return analysis;
 
@@ -497,19 +557,21 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
         return dto;
     }
 
-    /**
-     * Surcharge enrichie — utilisée uniquement après analyzeImage().
-     * Ajoute les 4 champs du modèle Python au-dessus du DTO de base.
-     */
     private SkinAnalysisResponseDto toResponseDto(SkinAnalysis a,
                                                   SkinModelService.SkinModelResult modelResult) {
-        SkinAnalysisResponseDto dto = toResponseDto(a); // réutilise la surcharge de base
+        SkinAnalysisResponseDto dto = toResponseDto(a);
 
         if (modelResult != null) {
             dto.setModelPrediction(modelResult.prediction);
             dto.setModelConfidence(modelResult.confidence);
-            dto.setModelProbabilities(modelResult.allProbabilities);
+            dto.setModelProbabilities(
+                    modelResult.allProbabilities != null ? modelResult.allProbabilities : Map.of()
+            );
             dto.setModelWasAvailable(modelResult.modelAvailable);
+            if (!modelResult.modelAvailable) {
+                dto.setModelPrediction("unavailable");
+                dto.setModelConfidence(0.0);
+            }
         }
 
         return dto;
