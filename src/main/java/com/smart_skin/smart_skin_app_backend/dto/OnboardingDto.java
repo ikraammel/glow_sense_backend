@@ -13,4 +13,11 @@ public class OnboardingDto {
     private String effortLevel;        // low, medium, high
     private String sunExposure;        // rare, moderate, frequent
     private String ingredientsToAvoid; // comma-separated
+    private Integer age;
+    private String gender;
+    private String skinSensitivity;
+    private String tirednessLevel;
+    private String stressLevel;
+    private String desiredBenefits;
+    private String onboardingName;
 }

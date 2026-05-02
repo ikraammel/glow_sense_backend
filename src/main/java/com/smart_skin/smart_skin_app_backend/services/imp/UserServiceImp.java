@@ -131,12 +131,19 @@ public class UserServiceImp implements UserService {
         if (dto.getFirstName() != null) user.setFirstName(dto.getFirstName());
         if (dto.getLastName() != null) user.setLastName(dto.getLastName());
         if (dto.getPhoneNumber() != null) user.setPhoneNumber(dto.getPhoneNumber());
-        if (dto.getDateOfBirth() != null) user.setDateOfBirth(dto.getDateOfBirth());
         if (dto.getSkinType() != null) user.setSkinType(dto.getSkinType());
         if (dto.getSkinConcerns() != null) user.setSkinConcerns(dto.getSkinConcerns());
         if (dto.getRoutinePreference() != null) user.setRoutinePreference(dto.getRoutinePreference());
         if (dto.getEffortLevel() != null) user.setEffortLevel(dto.getEffortLevel());
         if (dto.getSunExposure() != null) user.setSunExposure(dto.getSunExposure());
+        if (dto.getAge() != null) user.setAge(dto.getAge());
+        if (dto.getGender() != null) user.setGender(dto.getGender());
+        if (dto.getSkinSensitivity() != null) user.setSkinSensitivity(dto.getSkinSensitivity());
+        if (dto.getTirednessLevel() != null) user.setTirednessLevel(dto.getTirednessLevel());
+        if (dto.getStressLevel() != null) user.setStressLevel(dto.getStressLevel());
+        if (dto.getIngredientsToAvoid() != null) user.setIngredientsToAvoid(dto.getIngredientsToAvoid());
+        if (dto.getDesiredBenefits() != null) user.setDesiredBenefits(dto.getDesiredBenefits());
+        if (dto.getOnboardingName() != null) user.setOnboardingName(dto.getOnboardingName());
         user.setNotificationsEnabled(dto.isNotificationsEnabled());
 
         user = userRepository.save(user);
@@ -161,6 +168,13 @@ public class UserServiceImp implements UserService {
         user.setEffortLevel(dto.getEffortLevel());
         user.setSunExposure(dto.getSunExposure());
         user.setIngredientsToAvoid(dto.getIngredientsToAvoid());
+        user.setAge(dto.getAge());
+        user.setGender(dto.getGender());
+        user.setSkinSensitivity(dto.getSkinSensitivity());
+        user.setTirednessLevel(dto.getTirednessLevel());
+        user.setStressLevel(dto.getStressLevel());
+        user.setDesiredBenefits(dto.getDesiredBenefits());
+        user.setOnboardingName(dto.getOnboardingName());
         user.setOnboardingCompleted(true);
 
         user = userRepository.save(user);

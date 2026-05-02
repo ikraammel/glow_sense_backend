@@ -37,9 +37,6 @@ public class User implements UserDetails {
     private String phoneNumber;
 
     @Column
-    private LocalDate dateOfBirth;
-
-    @Column
     private String profileImageUrl;
 
     @Enumerated(EnumType.STRING)
@@ -62,6 +59,27 @@ public class User implements UserDetails {
 
     @Column
     private String ingredientsToAvoid;
+
+    @Column
+    private Integer age;
+
+    @Column
+    private String gender;
+
+    @Column
+    private String skinSensitivity;
+
+    @Column
+    private String tirednessLevel;
+
+    @Column
+    private String stressLevel;
+
+    @Column
+    private String desiredBenefits;
+
+    @Column
+    private String onboardingName;
 
     @Column
     private boolean notificationsEnabled = true;

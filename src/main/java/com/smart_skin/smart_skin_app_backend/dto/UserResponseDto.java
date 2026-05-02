@@ -13,7 +13,6 @@ public class UserResponseDto {
     private String lastName;
     private String email;
     private String phoneNumber;
-    private LocalDate dateOfBirth;
     private String profileImageUrl;
     private SkinType skinType;
     private String skinConcerns;
@@ -42,4 +41,12 @@ public class UserResponseDto {
     private LocalDateTime deletionRequestedAt;
     private boolean onboardingCompleted;
     private LocalDateTime createdAt;
+    private Integer age;
+    private String gender;
+    private String skinSensitivity;
+    private String tirednessLevel;
+    private String stressLevel;
+    private String ingredientsToAvoid;
+    private String desiredBenefits;
+    private String onboardingName;
 }
