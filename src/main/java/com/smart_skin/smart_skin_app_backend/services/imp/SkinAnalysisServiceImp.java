@@ -84,7 +84,7 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
         SkinAnalysis analysis = SkinAnalysis.builder()
                 .user(user)
                 .skinImage(skinImage)
-                .detectedSkinType(mapSkinType(modelResult.prediction))
+                .detectedSkinType(SkinType.INCONNU)
                 .analysisDescription(
                         modelResult.modelAvailable
                                 ? String.format(
@@ -94,10 +94,10 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
                         )
                                 : "Analyse IA indisponible, fallback utilisé."
                 )
-                .acneScore(50)
-                .pigmentationScore(50)
-                .wrinkleScore(50)
-                .poreScore(50)
+                .acneScore(0)
+                .pigmentationScore(0)
+                .wrinkleScore(0)
+                .poreScore(0)
                 .hydrationScore(50)
                 .overallScore(50)
                 .build();
@@ -126,14 +126,23 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
     private SkinType mapSkinType(String prediction) {
         if (prediction == null) return SkinType.INCONNU;
 
-        return switch (prediction.toLowerCase()) {
-            case "acne" -> SkinType.ACNEIQUE;
-            case "dry", "dry skin" -> SkinType.SEC;
-            case "oily", "oil skin" -> SkinType.GRAS;
-            case "combination", "mixed" -> SkinType.MIXTE;
-            case "sensitive" -> SkinType.SENSIBLE;
-            default -> SkinType.INCONNU;
-        };
+        String p = prediction.toLowerCase().trim();
+
+        if (p.contains("acne")) return SkinType.ACNEIQUE;
+        if (p.contains("dry")) return SkinType.SEC;
+        if (p.contains("oil") || p.contains("oily")) return SkinType.GRAS;
+        if (p.contains("comb")) return SkinType.MIXTE;
+        if (p.contains("sens")) return SkinType.SENSIBLE;
+        if (p.contains("normal")) return SkinType.NORMAL;
+
+        return SkinType.INCONNU;
+    }
+
+    private String normalizeKey(String key) {
+        if (key == null) return null;
+        return key.toLowerCase().trim()
+                .replace("_", " ")
+                .replace("spotsp", "spots"); // fix ton bug visible
     }
 
     private List<SkinProblem> buildProblemsFromModel(
@@ -156,7 +165,7 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
                 .description("Détecté par modèle IA")
                 .confidence(modelResult.confidence / 100.0)
                 .build());
-
+        log.info("MODEL PREDICTION RAW = {}", modelResult.prediction);
         return problems;
     }
 
@@ -303,43 +312,67 @@ Réponds en JSON:
                                   SkinModelService.SkinModelResult modelResult) {
 
         // 🔥 IMPORTANT : Initialiser les scores par défaut si null
-        if (analysis.getAcneScore() == null) analysis.setAcneScore(50);
-        if (analysis.getPigmentationScore() == null) analysis.setPigmentationScore(50);
-        if (analysis.getWrinkleScore() == null) analysis.setWrinkleScore(50);
-        if (analysis.getPoreScore() == null) analysis.setPoreScore(50);
+        if (analysis.getAcneScore() == null) analysis.setAcneScore(0);
+        if (analysis.getPigmentationScore() == null) analysis.setPigmentationScore(0);
+        if (analysis.getWrinkleScore() == null) analysis.setWrinkleScore(0);
+        if (analysis.getPoreScore() == null) analysis.setPoreScore(0);
         if (analysis.getHydrationScore() == null) analysis.setHydrationScore(50);
         if (analysis.getOverallScore() == null) analysis.setOverallScore(50);
 
-        Map<String, Double> probs = modelResult.allProbabilities != null
+        Map<String, Double> rawProbs = modelResult.allProbabilities != null
                 ? modelResult.allProbabilities
                 : new HashMap<>();
 
-        if (probs.containsKey("acne")) {
-            int aiScore = 100 - probs.get("acne").intValue();
-            analysis.setAcneScore((analysis.getAcneScore() + aiScore) / 2);
+        Map<String, Double> probs = new HashMap<>();
+
+        for (Map.Entry<String, Double> e : rawProbs.entrySet()) {
+            probs.put(normalizeKey(e.getKey()), e.getValue());
         }
+
+        if (probs.containsKey("acne")) {
+            int aiScore = (int) Math.round(100 - probs.get("acne"));
+            analysis.setAcneScore(aiScore);        }
         if (probs.containsKey("dark spots")) {
-            int aiScore = 100 - probs.get("dark spots").intValue();
-            analysis.setPigmentationScore((analysis.getPigmentationScore() + aiScore) / 2);
+            int aiScore = (int) Math.round(100 - probs.get("dark spots"));
+            analysis.setPigmentationScore(aiScore);
         }
         if (probs.containsKey("wrinkles")) {
-            int aiScore = 100 - probs.get("wrinkles").intValue();
-            analysis.setWrinkleScore((analysis.getWrinkleScore() + aiScore) / 2);
+            int aiScore = (int) Math.round(100 - probs.get("wrinkles"));
+            analysis.setWrinkleScore(aiScore);
         }
         if (probs.containsKey("pores")) {
-            int aiScore = 100 - probs.get("pores").intValue();
-            analysis.setPoreScore((analysis.getPoreScore() + aiScore) / 2);
+            int aiScore = (int) Math.round(100 - probs.get("pores"));
+            analysis.setPoreScore(aiScore);
         }
         // hydrationScore reste celui de Groq (le modèle Python ne le prédit pas)
 
-        // Recalculer overallScore = moyenne des 5 scores
-        int overall = (
-                analysis.getAcneScore()         +
-                        analysis.getPigmentationScore() +
-                        analysis.getWrinkleScore()      +
-                        analysis.getPoreScore()         +
-                        analysis.getHydrationScore()
-        ) / 5;
+        // Recalculer overallScore = moyenne des scores disponibles (évite le blocage si certains scores restent par défaut)
+        int count = 0;
+        int sum = 0;
+        
+        if (analysis.getAcneScore() != null && analysis.getAcneScore() > 0) {
+            sum += analysis.getAcneScore();
+            count++;
+        }
+        if (analysis.getPigmentationScore() != null && analysis.getPigmentationScore() > 0) {
+            sum += analysis.getPigmentationScore();
+            count++;
+        }
+        if (analysis.getWrinkleScore() != null && analysis.getWrinkleScore() > 0) {
+            sum += analysis.getWrinkleScore();
+            count++;
+        }
+        if (analysis.getPoreScore() != null && analysis.getPoreScore() > 0) {
+            sum += analysis.getPoreScore();
+            count++;
+        }
+        // Toujours inclure hydrationScore car il vient de Groq
+        if (analysis.getHydrationScore() != null) {
+            sum += analysis.getHydrationScore();
+            count++;
+        }
+        
+        int overall = count > 0 ? sum / count : 50;
         analysis.setOverallScore(overall);
 
         // Ajouter le problème principal du modèle en tête de liste
@@ -404,10 +437,10 @@ Réponds en JSON:
                     .detectedSkinType(parseSkinType(root.path("detectedSkinType").asText()))
                     .overallScore(root.path("overallScore").asInt(50))
                     .hydrationScore(root.path("hydrationScore").asInt(50))
-                    .acneScore(root.path("acneScore").asInt(50))
-                    .pigmentationScore(root.path("pigmentationScore").asInt(50))
-                    .wrinkleScore(root.path("wrinkleScore").asInt(50))
-                    .poreScore(root.path("poreScore").asInt(50))
+                    .acneScore(root.path("acneScore").asInt(0))
+                    .pigmentationScore(root.path("pigmentationScore").asInt(0))
+                    .wrinkleScore(root.path("wrinkleScore").asInt(0))
+                    .poreScore(root.path("poreScore").asInt(0))
                     .analysisDescription(root.path("analysisDescription").asText())
                     .aiRawResponse(aiJson)
                     .build();
@@ -476,10 +509,10 @@ Réponds en JSON:
                   "detectedSkinType": "MIXTE",
                   "overallScore": 65,
                   "hydrationScore": 60,
-                  "acneScore": 45,
-                  "pigmentationScore": 70,
-                  "wrinkleScore": 80,
-                  "poreScore": 55,
+                  "acneScore": 0,
+                  "pigmentationScore": 0,
+                  "wrinkleScore": 0,
+                  "poreScore": 0,
                   "analysisDescription": "Votre peau présente des caractéristiques mixtes avec une zone T légèrement grasse et des joues normales à sèches.",
                   "problems": [
                     {"problemType": "acne",          "severity": "LEGERE",  "zone": "front",  "description": "Quelques petits boutons sur le front",      "confidence": 0.85},
