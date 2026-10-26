@@ -45,7 +45,7 @@ public class SkinAnalysisServiceImp implements SkinAnalysisService {
     @Value("${groq.api-key}")
     private String groqApiKey;
 
-    @Value("${groq.model:llama-3.3-70b-versatile}")
+    @Value("${groq.model:openai/gpt-oss-120b}")
     private String groqModel;
 
     @Override
